@@ -1,0 +1,1 @@
+{"name":"audit","description":"Record a message with host-injected request context.","parametersJsonSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false},"responseJsonSchema":{"type":"null"}}

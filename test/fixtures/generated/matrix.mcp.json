@@ -1,0 +1,1 @@
+{"name":"matrix","description":"Accept nested integer arrays.","inputSchema":{"type":"object","properties":{"rows":{"type":"array","items":{"type":"array","items":{"type":"integer"}},"minItems":1,"maxItems":16}},"required":["rows"],"additionalProperties":false},"outputSchema":{"type":"null"},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false}}

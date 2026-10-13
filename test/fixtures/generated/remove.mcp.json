@@ -1,0 +1,1 @@
+{"name":"remove","description":"Demonstrate destructive and idempotent safety hints.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false},"outputSchema":{"type":"null"},"annotations":{"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true}}

@@ -1,0 +1,20 @@
+.{
+    .name = .zig_blacksmith,
+    .version = "0.1.0",
+    .fingerprint = 0x4462d3058c118834,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+        "examples",
+        "spikes",
+        "bench",
+        "docs",
+        "LICENSE",
+        "README.md",
+        "CHANGELOG.md",
+    },
+}

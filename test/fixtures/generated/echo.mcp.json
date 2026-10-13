@@ -1,0 +1,1 @@
+{"name":"echo","description":"Echo bounded text.","inputSchema":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":256}},"required":["text"],"additionalProperties":false},"outputSchema":{"type":"string"},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false}}
