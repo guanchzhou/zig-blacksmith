@@ -1,0 +1,1 @@
+{"name":"get_weather","description":"Get weather.","strict":true,"input_schema":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"],"additionalProperties":false}}

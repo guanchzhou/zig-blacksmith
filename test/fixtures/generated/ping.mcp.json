@@ -1,0 +1,1 @@
+{"name":"ping","description":"Return an explicit empty success.","inputSchema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"outputSchema":{"type":"null"},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false}}

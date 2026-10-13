@@ -1,0 +1,1 @@
+{"type":"function","name":"get_weather","description":"Get weather.","strict":false,"parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"],"additionalProperties":false},"output_schema":{"type":"object","properties":{"temperature":{"type":"number"}},"required":["temperature"],"additionalProperties":false}}

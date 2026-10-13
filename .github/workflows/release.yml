@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Verify signed annotated tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          object_type=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" --jq .object.type)
+          test "$object_type" = tag
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" --jq .object.sha)
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq .verification.verified)" = true
+      - name: Verify source
+        run: |
+          zig fmt --check build.zig src test examples spikes bench
+          zig build test
+          python3 test/validate_fixtures.py
+          python3 test/test_cli.py
+          python3 test/verify_authorship.py
+      - name: Build reproducible launchers
+        run: |
+          set -eu
+          mkdir -p dist first second
+          for target in x86_64-linux-gnu x86_64-macos-none x86_64-windows-gnu; do
+            rm -rf first/* second/*
+            zig build -Dtarget="$target" -Doptimize=ReleaseSafe --prefix "$PWD/first"
+            zig build -Dtarget="$target" -Doptimize=ReleaseSafe --prefix "$PWD/second"
+            suffix=
+            if [ "$target" = x86_64-windows-gnu ]; then suffix=.exe; fi
+            cmp "first/bin/zig-tool${suffix}" "second/bin/zig-tool${suffix}"
+            mkdir "zig-blacksmith-${GITHUB_REF_NAME}-${target}"
+            cp "first/bin/zig-tool${suffix}" "zig-blacksmith-${GITHUB_REF_NAME}-${target}/"
+            tar -czf "dist/zig-blacksmith-${GITHUB_REF_NAME}-${target}.tar.gz" \
+              "zig-blacksmith-${GITHUB_REF_NAME}-${target}"
+            rm -rf "zig-blacksmith-${GITHUB_REF_NAME}-${target}"
+          done
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

@@ -1,0 +1,1 @@
+{"name":"ping","description":"Return an explicit empty success.","parametersJsonSchema":{"type":"object","properties":{},"required":[],"additionalProperties":false},"responseJsonSchema":{"type":"null"}}

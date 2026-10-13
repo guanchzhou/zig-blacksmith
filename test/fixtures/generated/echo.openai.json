@@ -1,0 +1,1 @@
+{"type":"function","name":"echo","description":"Echo bounded text.","strict":false,"parameters":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":256}},"required":["text"],"additionalProperties":false},"output_schema":{"type":"string"}}

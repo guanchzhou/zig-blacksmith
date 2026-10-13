@@ -1,0 +1,1 @@
+{"name":"scale","description":"Double a constrained integer.","inputSchema":{"type":"object","properties":{"value":{"type":"integer","minimum":-100,"maximum":100,"description":"Value to double.","examples":[4]}},"required":["value"],"additionalProperties":false},"outputSchema":{"type":"integer"},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false}}

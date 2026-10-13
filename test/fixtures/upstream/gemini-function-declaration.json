@@ -1,0 +1,1 @@
+{"name":"get_weather","description":"Get weather.","parametersJsonSchema":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"],"additionalProperties":false},"responseJsonSchema":{"type":"object","properties":{"temperature":{"type":"number"}},"required":["temperature"],"additionalProperties":false}}
