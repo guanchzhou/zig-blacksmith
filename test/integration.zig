@@ -174,3 +174,26 @@ test "MCP refuses protocol mismatch" {
         blacksmith.emit.mcp.negotiate("2025-11-25").?.code,
     );
 }
+
+test "nested struct field with default_json is optional on wire and populated at runtime" {
+    const Filter = struct {
+        limit: u32,
+    };
+    const Query = struct {
+        filter: Filter,
+    };
+    const handler = struct {
+        fn run(q: Query) u32 {
+            return q.filter.limit;
+        }
+    }.run;
+    const Paginated = blacksmith.Tool(handler, .{
+        .name = "paginated",
+        .description = "Nested default_json fixture.",
+        .fields = &.{.{ .name = "filter.limit", .default_json = "25" }},
+    });
+
+    const out = try Paginated.invoke(std.testing.allocator, "{\"filter\":{}}");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("{\"kind\":\"success\",\"output\":25}", out);
+}
