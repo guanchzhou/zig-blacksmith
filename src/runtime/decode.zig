@@ -99,11 +99,22 @@ fn validateValue(
         .bool => if (value != .bool) return wrong(path, "boolean", category(value)),
         .int => {
             const number = switch (value) {
-                .integer => |v| @as(f64, @floatFromInt(v)),
-                .number_string => |v| std.fmt.parseFloat(f64, v) catch return wrong(path, "integer", "number"),
+                .integer => |v| blk: {
+                    if (v < std.math.minInt(T) or v > std.math.maxInt(T))
+                        return constraintFailure(path, "integer type range");
+                    break :blk @as(f64, @floatFromInt(v));
+                },
+                .number_string => |v| blk: {
+                    if (std.fmt.parseInt(T, v, 10)) |iv| {
+                        break :blk @as(f64, @floatFromInt(iv));
+                    } else |_| {
+                        const fv = std.fmt.parseFloat(f64, v) catch return wrong(path, "integer", "number");
+                        if (@floor(fv) != fv) return wrong(path, "integer", "number");
+                        return constraintFailure(path, "integer type range");
+                    }
+                },
                 else => return wrong(path, "integer", category(value)),
             };
-            if (@floor(number) != number) return wrong(path, "integer", "number");
             if (fieldConstraints(meta, path)) |constraints| if (numericViolation(constraints, number))
                 return constraintFailure(path, "numeric bounds");
         },
@@ -172,7 +183,7 @@ fn validateValue(
                 if (object.get(field_name)) |child| {
                     if (validateValue(field_type, meta, child, child_path)) |failure| return failure;
                 } else {
-                    const fm = derive.fieldMeta(meta, field_name);
+                    const fm = derive.fieldMeta(meta, child_path[2..]);
                     if (!derive.isOptional(field_type) and !derive.hasDefault(T, i) and fm.default_json == null)
                         return .{
                             .stage = .validation,
