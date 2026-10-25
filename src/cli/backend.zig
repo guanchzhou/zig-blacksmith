@@ -188,16 +188,7 @@ fn targetToDiagnostic(target: blacksmith.emit.Target) blacksmith.diagnostic.Targ
 }
 
 fn failDiagnostic(failure: blacksmith.diagnostic.Diagnostic) noreturn {
-    std.debug.print(
-        "{{\"stage\":\"{s}\",\"code\":\"{s}\",\"target\":\"{s}\",\"path\":\"{s}\",\"message\":\"{s}\"}}\n",
-        .{
-            @tagName(failure.stage),
-            @tagName(failure.code),
-            @tagName(failure.target),
-            failure.path,
-            failure.message,
-        },
-    );
+    std.debug.print("{f}\n", .{std.json.fmt(failure, .{})});
     std.process.exit(1);
 }
 

@@ -41,7 +41,7 @@ pub fn validate(comptime handler: anytype, comptime meta: contract.ToolMeta) voi
     inline for (meta.fields) |field_meta| {
         if (!pathExists(input, field_meta.name))
             @compileError("blacksmith field metadata names a field path that does not exist");
-        validateConstraints(field_meta.constraints);
+        validateConstraints(FieldType(input, field_meta.name), field_meta.constraints);
     }
 
     inline for (meta.errors) |tool_error| {
@@ -95,15 +95,83 @@ fn validateName(comptime name: []const u8) void {
     }
 }
 
-fn validateConstraints(comptime c: contract.Constraints) void {
+fn validateConstraints(comptime Field: type, comptime c: contract.Constraints) void {
     if (c.pattern != null)
         @compileError("blacksmith 0.1 does not support runtime pattern validation");
+    const numeric = c.minimum != null or c.maximum != null;
+    const length = c.min_length != null or c.max_length != null;
+    const items = c.min_items != null or c.max_items != null;
+    const T = Unwrapped(Field);
+    switch (kind(T)) {
+        .integer, .number => {
+            if (length or items) @compileError("blacksmith length and item constraints apply only to strings and arrays");
+        },
+        .string => {
+            if (numeric or items) @compileError("blacksmith string fields accept only min_length and max_length");
+            if (length and @typeInfo(T) == .array) @compileError("blacksmith fixed-length arrays take their length from the type");
+        },
+        .array => {
+            if (numeric or length) @compileError("blacksmith array fields accept only min_items and max_items");
+            if (items and @typeInfo(T) == .array) @compileError("blacksmith fixed-length arrays take their length from the type");
+        },
+        else => if (numeric or length or items) @compileError("blacksmith constraints apply only to numbers, strings, and arrays"),
+    }
+    if (c.minimum) |minimum| if (!std.math.isFinite(minimum)) @compileError("blacksmith field minimum must be finite");
+    if (c.maximum) |maximum| if (!std.math.isFinite(maximum)) @compileError("blacksmith field maximum must be finite");
     if (c.minimum != null and c.maximum != null and c.minimum.? > c.maximum.?)
         @compileError("blacksmith field minimum cannot exceed maximum");
+    if (@typeInfo(T) == .int) _ = integerBounds(T, c);
     if (c.min_length != null and c.max_length != null and c.min_length.? > c.max_length.?)
         @compileError("blacksmith field min_length cannot exceed max_length");
     if (c.min_items != null and c.max_items != null and c.min_items.? > c.max_items.?)
         @compileError("blacksmith field min_items cannot exceed max_items");
+}
+
+pub fn Wide(comptime T: type) type {
+    return @Int(.signed, @max(128, @typeInfo(T).int.bits + 1));
+}
+
+pub fn IntegerBounds(comptime T: type) type {
+    return struct { min: Wide(T), max: Wide(T) };
+}
+
+pub fn integerBounds(comptime T: type, comptime c: contract.Constraints) IntegerBounds(T) {
+    const W = Wide(T);
+    const low: W = std.math.minInt(T);
+    const high: W = std.math.maxInt(T);
+    var bounds: IntegerBounds(T) = .{ .min = low, .max = high };
+    if (c.minimum) |minimum| {
+        if (minimum > @as(f64, @floatFromInt(high)))
+            @compileError("blacksmith field minimum exceeds the range of its integer type");
+        if (minimum > @as(f64, @floatFromInt(low))) bounds.min = @intFromFloat(@ceil(minimum));
+    }
+    if (c.maximum) |maximum| {
+        if (maximum < @as(f64, @floatFromInt(low)))
+            @compileError("blacksmith field maximum is below the range of its integer type");
+        if (maximum < @as(f64, @floatFromInt(high))) bounds.max = @intFromFloat(@floor(maximum));
+    }
+    if (bounds.min > bounds.max) @compileError("blacksmith integer field bounds admit no value");
+    return bounds;
+}
+
+pub fn Unwrapped(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .optional => |optional| Unwrapped(optional.child),
+        else => T,
+    };
+}
+
+pub fn FieldType(comptime T: type, comptime path: []const u8) type {
+    const info = @typeInfo(Unwrapped(T)).@"struct";
+    const dot = std.mem.indexOfScalar(u8, path, '.');
+    const segment = if (dot) |index| path[0..index] else path;
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        if (comptime contract.eql(segment, field_name)) {
+            if (dot) |index| return FieldType(field_type, path[index + 1 ..]);
+            return field_type;
+        }
+    }
+    @compileError("blacksmith field metadata names a field path that does not exist");
 }
 
 fn validateType(comptime T: type, comptime path: []const u8, comptime allow_error_union: bool) void {

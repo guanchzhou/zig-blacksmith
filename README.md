@@ -49,7 +49,7 @@ zig build blacksmith -- check weather --target mcp --generated weather.json
 zig build blacksmith -- fixtures generate all --ack-version 2026-07-28
 ```
 
-`zig build install` installs the generic `zig-tool` launcher and the example project-bound backend. The launcher finds the nearest `build.zig` and delegates to its `blacksmith` build step.
+`zig build install` installs the generic `zig-tool` launcher and the example project-bound backend. The launcher finds the nearest directory with both `build.zig` and `build.zig.zon`, stopping at a directory containing `.git` or at `$HOME`, and delegates to its `blacksmith` build step.
 
 ## Runtime guarantees
 

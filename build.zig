@@ -110,6 +110,24 @@ pub fn build(b: *std.Build) void {
     duplicate_registry_name.expect_errors = .{ .contains = "blacksmith registry contains duplicate tool names" };
     test_step.dependOn(&duplicate_registry_name.step);
 
+    const non_finite_bound = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test/compile_fail/non_finite_bound.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "blacksmith", .module = blacksmith }},
+    }) });
+    non_finite_bound.expect_errors = .{ .contains = "blacksmith field maximum must be finite" };
+    test_step.dependOn(&non_finite_bound.step);
+
+    const constraint_kind_mismatch = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test/compile_fail/constraint_kind_mismatch.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "blacksmith", .module = blacksmith }},
+    }) });
+    constraint_kind_mismatch.expect_errors = .{ .contains = "blacksmith length and item constraints apply only to strings and arrays" };
+    test_step.dependOn(&constraint_kind_mismatch.step);
+
     const example = b.addExecutable(.{
         .name = "weather-tools",
         .root_module = registry,

@@ -7,10 +7,6 @@ pub const Decoded = struct {
     value: std.json.Value,
 };
 
-const Frame = struct {
-    keys: std.StringHashMapUnmanaged(void) = .empty,
-};
-
 pub fn decode(
     comptime T: type,
     comptime meta: contract.ToolMeta,
@@ -20,9 +16,9 @@ pub fn decode(
     ok: T,
     invalid: diagnostic.Diagnostic,
 } {
-    if (try duplicateKey(arena, text)) |key| {
-        _ = key;
-        return .{ .invalid = diagnostic.safe(
+    var parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.DuplicateField => return .{ .invalid = diagnostic.safe(
             .validation,
             .duplicate_key,
             .runtime,
@@ -30,11 +26,8 @@ pub fn decode(
             "unique object keys",
             "duplicate_key",
             "duplicate object key",
-        ) };
-    }
-
-    var parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch
-        return .{ .invalid = diagnostic.safe(
+        ) },
+        else => return .{ .invalid = diagnostic.safe(
             .validation,
             .invalid_json,
             .runtime,
@@ -42,7 +35,8 @@ pub fn decode(
             "valid JSON",
             "malformed_json",
             "invalid JSON input",
-        ) };
+        ) },
+    };
 
     if (validateValue(T, meta, parsed, "$")) |failure| return .{ .invalid = failure };
     try applyDefaults(T, meta, arena, &parsed, "");
@@ -60,35 +54,6 @@ pub fn decode(
     return .{ .ok = typed };
 }
 
-fn duplicateKey(arena: std.mem.Allocator, text: []const u8) !?[]const u8 {
-    var scanner = std.json.Scanner.initCompleteInput(arena, text);
-    defer scanner.deinit();
-    var frames: std.ArrayList(Frame) = .empty;
-    defer frames.deinit(arena);
-
-    while (true) {
-        const token = scanner.nextAlloc(arena, .alloc_if_needed) catch return null;
-        switch (token) {
-            .object_begin => try frames.append(arena, .{}),
-            .object_end => {
-                if (frames.items.len != 0) {
-                    var frame = frames.pop().?;
-                    frame.keys.deinit(arena);
-                }
-            },
-            .string, .allocated_string => |key| {
-                if (scanner.string_is_object_key and frames.items.len != 0) {
-                    const owned = try arena.dupe(u8, key);
-                    const result = try frames.items[frames.items.len - 1].keys.getOrPut(arena, owned);
-                    if (result.found_existing) return key;
-                }
-            },
-            .end_of_document => return null,
-            else => {},
-        }
-    }
-}
-
 fn validateValue(
     comptime T: type,
     comptime meta: contract.ToolMeta,
@@ -97,27 +62,7 @@ fn validateValue(
 ) ?diagnostic.Diagnostic {
     switch (@typeInfo(T)) {
         .bool => if (value != .bool) return wrong(path, "boolean", category(value)),
-        .int => {
-            const number = switch (value) {
-                .integer => |v| blk: {
-                    if (v < std.math.minInt(T) or v > std.math.maxInt(T))
-                        return constraintFailure(path, "integer type range");
-                    break :blk @as(f64, @floatFromInt(v));
-                },
-                .number_string => |v| blk: {
-                    if (std.fmt.parseInt(T, v, 10)) |iv| {
-                        break :blk @as(f64, @floatFromInt(iv));
-                    } else |_| {
-                        const fv = std.fmt.parseFloat(f64, v) catch return wrong(path, "integer", "number");
-                        if (@floor(fv) != fv) return wrong(path, "integer", "number");
-                        return constraintFailure(path, "integer type range");
-                    }
-                },
-                else => return wrong(path, "integer", category(value)),
-            };
-            if (fieldConstraints(meta, path)) |constraints| if (numericViolation(constraints, number))
-                return constraintFailure(path, "numeric bounds");
-        },
+        .int => return validateInteger(T, meta, value, path),
         .float, .comptime_float => {
             const number = switch (value) {
                 .float => |v| v,
@@ -134,12 +79,12 @@ fn validateValue(
             return validateValue(optional.child, meta, value, path);
         },
         .pointer => |pointer| {
-            if (pointer.child == u8) return validateString(meta, value, path);
-            return validateArray(pointer.child, meta, value, path);
+            if (pointer.child == u8) return validateString(meta, value, path, null);
+            return validateArray(pointer.child, meta, value, path, null);
         },
         .array => |array| {
-            if (array.child == u8) return validateString(meta, value, path);
-            return validateArray(array.child, meta, value, path);
+            if (array.child == u8) return validateString(meta, value, path, array.len);
+            return validateArray(array.child, meta, value, path, array.len);
         },
         .@"enum" => |enumeration| {
             const text = switch (value) {
@@ -213,18 +158,52 @@ fn validateValue(
     return null;
 }
 
+fn validateInteger(
+    comptime T: type,
+    comptime meta: contract.ToolMeta,
+    value: std.json.Value,
+    comptime path: []const u8,
+) ?diagnostic.Diagnostic {
+    const W = derive.Wide(T);
+    const number: W = switch (value) {
+        .integer => |v| v,
+        .float => |v| blk: {
+            if (@floor(v) != v) return wrong(path, "integer", "number");
+            break :blk floatInteger(W, v) orelse return constraintFailure(path, "integer type range");
+        },
+        .number_string => |v| std.fmt.parseInt(W, v, 10) catch return constraintFailure(path, "integer type range"),
+        else => return wrong(path, "integer", category(value)),
+    };
+    if (number < std.math.minInt(T) or number > std.math.maxInt(T))
+        return constraintFailure(path, "integer type range");
+    if (comptime fieldConstraints(meta, path)) |constraints| {
+        const bounds = comptime derive.integerBounds(T, constraints);
+        if (number < bounds.min or number > bounds.max) return constraintFailure(path, "numeric bounds");
+    }
+    return null;
+}
+
+fn floatInteger(comptime W: type, value: f64) ?W {
+    const limit = comptime std.math.ldexp(@as(f64, 1), @typeInfo(W).int.bits - 1);
+    if (value < -limit or value >= limit) return null;
+    return @intFromFloat(value);
+}
+
 fn validateString(
     comptime meta: contract.ToolMeta,
     value: std.json.Value,
     comptime path: []const u8,
+    comptime fixed_len: ?usize,
 ) ?diagnostic.Diagnostic {
     const text = switch (value) {
         .string => |v| v,
         else => return wrong(path, "string", category(value)),
     };
+    if (fixed_len) |len| if (text.len != len) return constraintFailure(path, "fixed string length");
     if (fieldConstraints(meta, path)) |constraints| {
-        if (constraints.min_length) |minimum| if (text.len < minimum) return constraintFailure(path, "minimum string length");
-        if (constraints.max_length) |maximum| if (text.len > maximum) return constraintFailure(path, "maximum string length");
+        const count = std.unicode.utf8CountCodepoints(text) catch text.len;
+        if (constraints.min_length) |minimum| if (count < minimum) return constraintFailure(path, "minimum string length");
+        if (constraints.max_length) |maximum| if (count > maximum) return constraintFailure(path, "maximum string length");
     }
     return null;
 }
@@ -234,16 +213,18 @@ fn validateArray(
     comptime meta: contract.ToolMeta,
     value: std.json.Value,
     comptime path: []const u8,
+    comptime fixed_len: ?usize,
 ) ?diagnostic.Diagnostic {
     const array = switch (value) {
         .array => |v| v,
         else => return wrong(path, "array", category(value)),
     };
+    if (fixed_len) |len| if (array.items.len != len) return constraintFailure(path, "fixed array length");
     if (fieldConstraints(meta, path)) |constraints| {
         if (constraints.min_items) |minimum| if (array.items.len < minimum) return constraintFailure(path, "minimum array length");
         if (constraints.max_items) |maximum| if (array.items.len > maximum) return constraintFailure(path, "maximum array length");
     }
-    for (array.items) |child| if (validateValue(Child, meta, child, path)) |failure| return failure;
+    for (array.items) |child| if (validateValue(Child, meta, child, path ++ "[]")) |failure| return failure;
     return null;
 }
 
@@ -271,6 +252,24 @@ fn applyDefaults(
         }
         if (value.object.getPtr(field_name)) |child| try applyDefaults(field_type, meta, arena, child, child_path);
     }
+}
+
+pub fn checkDefaults(
+    comptime T: type,
+    comptime meta: contract.ToolMeta,
+    arena: std.mem.Allocator,
+) !?diagnostic.Diagnostic {
+    inline for (meta.fields) |field_meta| {
+        if (field_meta.default_json) |raw| {
+            const path = "$." ++ field_meta.name;
+            const value = std.json.parseFromSliceLeaky(std.json.Value, arena, raw, .{}) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return diagnostic.safe(.validation, .invalid_json, .runtime, path, "valid JSON", "malformed_json", "invalid JSON default"),
+            };
+            if (validateValue(derive.FieldType(T, field_meta.name), meta, value, path)) |failure| return failure;
+        }
+    }
+    return null;
 }
 
 fn fieldConstraints(comptime meta: contract.ToolMeta, comptime path: []const u8) ?contract.Constraints {
@@ -301,4 +300,13 @@ fn category(value: std.json.Value) []const u8 {
         .array => "array",
         .object => "object",
     };
+}
+
+test "std.json rejects duplicate keys when parsing a dynamic value" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectError(error.DuplicateField, std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"a\":1,\"a\":2}", .{}));
+    try std.testing.expectError(error.DuplicateField, std.json.parseFromSliceLeaky(std.json.Value, arena, "[{\"b\":{\"a\":1,\"\\u0061\":2}}]", .{}));
+    _ = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"a\":{\"a\":1},\"b\":{\"a\":2}}", .{});
 }

@@ -63,6 +63,23 @@ def main() -> None:
         check=True,
     )
     assert json.loads(launcher.stdout)["name"] == "weather"
+    assert f"using project {ROOT}" in launcher.stderr
+
+    with tempfile.TemporaryDirectory() as directory:
+        project = pathlib.Path(directory).resolve()
+        (project / ".git").mkdir()
+        (project / "build.zig").write_text("")
+        nested = project / "nested"
+        nested.mkdir()
+        outside = subprocess.run(
+            [ROOT / "zig-out/bin/zig-tool", "schema", "weather"],
+            cwd=nested,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert outside.returncode == 2, outside
+        assert "no build.zig with build.zig.zon" in outside.stderr
 
 
 if __name__ == "__main__":

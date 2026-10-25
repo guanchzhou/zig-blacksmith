@@ -8,6 +8,8 @@ Model-visible contracts support booleans, integers, floats, byte strings, slices
 
 Nested field metadata uses dotted paths such as `options.language`. Field order follows declaration order, producing deterministic schema bytes.
 
+Integers carry their type's range as `minimum` and `maximum`, narrowed by declared bounds and compared as integers. String lengths count Unicode code points. Fixed-size arrays declare their length. Constraints must match the field's kind and bounds must be finite; violations fail at compile time.
+
 ## Requiredness and defaults
 
 A field is required unless it is optional, has a Zig struct default, or declares `default_json`. A declared JSON default is validated, omitted from the schema's required set, and inserted after all supplied values pass validation. Explicit JSON `null` is valid only for optional fields.
@@ -31,7 +33,7 @@ The caller supplies `Host` through `invokeWithHost`; it never appears in schemas
 
 ## Runtime
 
-The decoder first scans raw JSON for duplicate object keys, then parses to `std.json.Value`, validates recursively against the same types and metadata used by emitters, applies defaults, and constructs the typed input. Unknown fields are rejected. Dispatch is synchronous.
+The decoder parses to `std.json.Value`, rejecting duplicate object keys, validates recursively against the same types and metadata used by emitters, applies defaults, and constructs the typed input. Unknown fields are rejected. Dispatch is synchronous.
 
 Results are normalized as:
 

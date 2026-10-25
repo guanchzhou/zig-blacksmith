@@ -197,3 +197,125 @@ test "nested struct field with default_json is optional on wire and populated at
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("{\"kind\":\"success\",\"output\":25}", out);
 }
+
+fn expectInvoke(comptime Tool: type, input: []const u8, needle: []const u8) !void {
+    const result = try Tool.invoke(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    if (std.mem.indexOf(u8, result, needle) == null) {
+        std.debug.print("expected {s} in {s}\n", .{ needle, result });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "array elements are not checked against the array field's constraints" {
+    try expectInvoke(tools.Matrix, "{\"rows\":[[]]}", "\"kind\":\"success\"");
+    try expectInvoke(tools.Matrix, "{\"rows\":[[1,2],[3]]}", "\"kind\":\"success\"");
+    try expectInvoke(tools.Matrix, "{\"rows\":[]}", "\"path\":\"$.rows\"");
+    try expectInvoke(tools.Matrix, "{\"rows\":[[2147483648]]}", "\"path\":\"$.rows[][]\"");
+}
+
+test "duplicate keys are reported as duplicate_key" {
+    try expectInvoke(tools.Scale, "{\"value\":2,\"value\":3}", "\"code\":\"duplicate_key\"");
+    try expectInvoke(tools.Weather, "{\"location\":\"x\",\"options\":{\"language\":\"a\",\"language\":\"b\"}}", "\"code\":\"duplicate_key\"");
+    try expectInvoke(tools.Scale, "{\"value\":2", "\"code\":\"invalid_json\"");
+}
+
+test "integer schemas carry the type range" {
+    const lookup = try tools.Lookup.contractJson(std.testing.allocator);
+    defer std.testing.allocator.free(lookup);
+    try std.testing.expect(std.mem.indexOf(u8, lookup, "{\"type\":\"integer\",\"minimum\":0,\"maximum\":18446744073709551615}") != null);
+
+    const scale = try tools.Scale.contractJson(std.testing.allocator);
+    defer std.testing.allocator.free(scale);
+    try std.testing.expect(std.mem.indexOf(u8, scale, "{\"type\":\"integer\",\"minimum\":-100,\"maximum\":100,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scale, "{\"type\":\"integer\",\"minimum\":-2147483648,\"maximum\":2147483647}") != null);
+}
+
+test "integer bounds compare without floating point rounding" {
+    const local = struct {
+        fn run(_: struct { id: i64, small: u8 }) void {}
+    }.run;
+    const Exact = blacksmith.Tool(local, .{
+        .name = "exact",
+        .description = "Exact integer bounds.",
+        .fields = &.{
+            .{ .name = "id", .constraints = .{ .maximum = 9007199254740992 } },
+            .{ .name = "small", .constraints = .{ .minimum = 1.5, .maximum = 1000 } },
+        },
+    });
+    const schema = try Exact.contractJson(std.testing.allocator);
+    defer std.testing.allocator.free(schema);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "\"minimum\":-9223372036854775808,\"maximum\":9007199254740992") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "\"minimum\":2,\"maximum\":255") != null);
+
+    try expectInvoke(Exact, "{\"id\":9007199254740992,\"small\":2}", "\"kind\":\"success\"");
+    try expectInvoke(Exact, "{\"id\":9007199254740993,\"small\":2}", "\"expected\":\"numeric bounds\"");
+    try expectInvoke(Exact, "{\"id\":1,\"small\":1}", "\"expected\":\"numeric bounds\"");
+    try expectInvoke(Exact, "{\"id\":1,\"small\":256}", "\"expected\":\"integer type range\"");
+    try expectInvoke(Exact, "{\"id\":9223372036854775808,\"small\":2}", "\"expected\":\"integer type range\"");
+    try expectInvoke(Exact, "{\"id\":9.223372036854775807e18,\"small\":2}", "\"expected\":\"integer type range\"");
+}
+
+test "integer fields accept integral floats" {
+    try expectInvoke(tools.Scale, "{\"value\":5.0}", "{\"kind\":\"success\",\"output\":10}");
+    try expectInvoke(tools.Scale, "{\"value\":1e2}", "{\"kind\":\"success\",\"output\":200}");
+    try expectInvoke(tools.Scale, "{\"value\":-1E1}", "{\"kind\":\"success\",\"output\":-20}");
+    try expectInvoke(tools.Scale, "{\"value\":1.01e2}", "\"expected\":\"numeric bounds\"");
+    try expectInvoke(tools.Scale, "{\"value\":5.5}", "\"code\":\"wrong_type\"");
+    try expectInvoke(tools.Scale, "{\"value\":1e400}", "\"expected\":\"integer type range\"");
+}
+
+fn repeated(comptime text: []const u8, comptime count: usize) []const u8 {
+    comptime var out: []const u8 = "";
+    inline for (0..count) |_| out = out ++ text;
+    return out;
+}
+
+test "string lengths count code points" {
+    const fits = comptime "{\"text\":\"" ++ repeated("\u{e9}", 256) ++ "\"}";
+    try expectInvoke(tools.Echo, fits, "\"kind\":\"success\"");
+    const too_long = comptime "{\"text\":\"" ++ repeated("\u{e9}", 257) ++ "\"}";
+    try expectInvoke(tools.Echo, too_long, "\"expected\":\"maximum string length\"");
+}
+
+test "fixed-length arrays declare and enforce their length" {
+    const local = struct {
+        fn run(_: struct { point: [3]i32, code: [2]u8 }) void {}
+    }.run;
+    const Fixed = blacksmith.Tool(local, .{ .name = "fixed", .description = "Fixed-length arrays." });
+    const schema = try Fixed.contractJson(std.testing.allocator);
+    defer std.testing.allocator.free(schema);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "\"minItems\":3,\"maxItems\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "{\"type\":\"string\",\"minLength\":2,\"maxLength\":2}") != null);
+
+    try expectInvoke(Fixed, "{\"point\":[1,2,3],\"code\":\"fi\"}", "\"kind\":\"success\"");
+    try expectInvoke(Fixed, "{\"point\":[1,2],\"code\":\"fi\"}", "\"expected\":\"fixed array length\"");
+    try expectInvoke(Fixed, "{\"point\":[1,2,3],\"code\":\"fin\"}", "\"expected\":\"fixed string length\"");
+}
+
+test "registry defaults satisfy their own constraints" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    inline for (tools.Registry.all) |Tool| {
+        if (try blacksmith.runtime.decode.checkDefaults(Tool.Input, Tool.meta, arena_state.allocator())) |failure| {
+            std.debug.print("{s}: default for {s} fails: {s}\n", .{ Tool.meta.name, failure.path, failure.message });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    const local = struct {
+        fn run(_: struct { count: u8, name: []const u8 }) void {}
+    }.run;
+    const meta: blacksmith.contract.ToolMeta = .{
+        .name = "bad_defaults",
+        .description = "Defaults that violate constraints.",
+        .fields = &.{
+            .{ .name = "count", .constraints = .{ .maximum = 10 }, .default_json = "11" },
+            .{ .name = "name", .constraints = .{ .max_length = 2 }, .default_json = "\"abc\"" },
+        },
+    };
+    _ = blacksmith.Tool(local, meta);
+    const failure = (try blacksmith.runtime.decode.checkDefaults(struct { count: u8, name: []const u8 }, meta, arena_state.allocator())).?;
+    try std.testing.expectEqualStrings("$.count", failure.path);
+    try std.testing.expectEqual(blacksmith.diagnostic.Code.constraint_violation, failure.code);
+}

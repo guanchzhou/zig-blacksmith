@@ -1,1 +1,1 @@
-{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"],"additionalProperties":false}
+{"type":"object","properties":{"id":{"type":"integer","minimum":0,"maximum":18446744073709551615}},"required":["id"],"additionalProperties":false}

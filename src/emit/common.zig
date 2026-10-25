@@ -59,8 +59,8 @@ fn writeSchemaAt(
 ) !void {
     switch (@typeInfo(T)) {
         .bool => try writer.writeAll("{\"type\":\"boolean\"}"),
-        .int => try writeNumeric(writer, "integer", field_meta),
-        .float, .comptime_float => try writeNumeric(writer, "number", field_meta),
+        .int => try writeInteger(writer, T, field_meta),
+        .float, .comptime_float => try writeNumber(writer, field_meta),
         .void => try writer.writeAll("{\"type\":\"null\"}"),
         .optional => |optional| {
             try writer.writeAll("{\"anyOf\":[");
@@ -69,16 +69,16 @@ fn writeSchemaAt(
         },
         .pointer => |pointer| {
             if (pointer.size == .slice and pointer.child == u8) {
-                try writeString(writer, field_meta);
+                try writeString(writer, field_meta, null);
             } else if (pointer.size == .slice) {
-                try writeArray(writer, pointer.child, meta, field_meta, path);
+                try writeArray(writer, pointer.child, meta, field_meta, path, null);
             } else unreachable;
         },
         .array => |array| {
             if (array.child == u8) {
-                try writeString(writer, field_meta);
+                try writeString(writer, field_meta, array.len);
             } else {
-                try writeArray(writer, array.child, meta, field_meta, path);
+                try writeArray(writer, array.child, meta, field_meta, path, array.len);
             }
         },
         .@"enum" => |enumeration| {
@@ -151,10 +151,16 @@ pub fn validateRawJson(comptime raw: []const u8) EmitError!void {
         return error.InvalidMetadataJson;
 }
 
-fn writeNumeric(writer: *std.Io.Writer, comptime name: []const u8, comptime field_meta: ?contract.FieldMeta) !void {
-    try writer.writeAll("{\"type\":\"");
-    try writer.writeAll(name);
-    try writer.writeAll("\"");
+fn writeInteger(writer: *std.Io.Writer, comptime T: type, comptime field_meta: ?contract.FieldMeta) !void {
+    const constraints = if (field_meta) |fm| fm.constraints else contract.Constraints{};
+    const bounds = comptime derive.integerBounds(T, constraints);
+    try writer.print("{{\"type\":\"integer\",\"minimum\":{d},\"maximum\":{d}", .{ bounds.min, bounds.max });
+    try writeDescriptionAndExample(writer, field_meta);
+    try writer.writeAll("}");
+}
+
+fn writeNumber(writer: *std.Io.Writer, comptime field_meta: ?contract.FieldMeta) !void {
+    try writer.writeAll("{\"type\":\"number\"");
     if (field_meta) |fm| {
         if (fm.constraints.minimum) |minimum| try writer.print(",\"minimum\":{d}", .{minimum});
         if (fm.constraints.maximum) |maximum| try writer.print(",\"maximum\":{d}", .{maximum});
@@ -163,8 +169,9 @@ fn writeNumeric(writer: *std.Io.Writer, comptime name: []const u8, comptime fiel
     try writer.writeAll("}");
 }
 
-fn writeString(writer: *std.Io.Writer, comptime field_meta: ?contract.FieldMeta) !void {
+fn writeString(writer: *std.Io.Writer, comptime field_meta: ?contract.FieldMeta, comptime fixed_len: ?usize) !void {
     try writer.writeAll("{\"type\":\"string\"");
+    if (fixed_len) |len| try writer.print(",\"minLength\":{d},\"maxLength\":{d}", .{ len, len });
     if (field_meta) |fm| {
         if (fm.constraints.min_length) |minimum| try writer.print(",\"minLength\":{d}", .{minimum});
         if (fm.constraints.max_length) |maximum| try writer.print(",\"maxLength\":{d}", .{maximum});
@@ -183,9 +190,11 @@ fn writeArray(
     comptime meta: contract.ToolMeta,
     comptime field_meta: ?contract.FieldMeta,
     comptime path: []const u8,
+    comptime fixed_len: ?usize,
 ) !void {
     try writer.writeAll("{\"type\":\"array\",\"items\":");
-    try writeSchemaAt(writer, Child, meta, null, path);
+    try writeSchemaAt(writer, Child, meta, null, path ++ "[]");
+    if (fixed_len) |len| try writer.print(",\"minItems\":{d},\"maxItems\":{d}", .{ len, len });
     if (field_meta) |fm| {
         if (fm.constraints.min_items) |minimum| try writer.print(",\"minItems\":{d}", .{minimum});
         if (fm.constraints.max_items) |maximum| try writer.print(",\"maxItems\":{d}", .{maximum});
