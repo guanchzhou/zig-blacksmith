@@ -58,14 +58,28 @@ fn writeSchemaAt(
     comptime path: []const u8,
 ) !void {
     switch (@typeInfo(T)) {
-        .bool => try writer.writeAll("{\"type\":\"boolean\"}"),
+        .bool => {
+            try writer.writeAll("{\"type\":\"boolean\"");
+            try writeDescriptionAndExample(writer, field_meta);
+            try writer.writeAll("}");
+        },
         .int => try writeInteger(writer, T, field_meta),
         .float, .comptime_float => try writeNumber(writer, field_meta),
-        .void => try writer.writeAll("{\"type\":\"null\"}"),
+        .void => {
+            try writer.writeAll("{\"type\":\"null\"");
+            try writeDescriptionAndExample(writer, field_meta);
+            try writer.writeAll("}");
+        },
         .optional => |optional| {
+            const inner_meta: ?contract.FieldMeta = if (field_meta) |fm| .{
+                .name = fm.name,
+                .constraints = fm.constraints,
+            } else null;
             try writer.writeAll("{\"anyOf\":[");
-            try writeSchemaAt(writer, optional.child, meta, field_meta, path);
-            try writer.writeAll(",{\"type\":\"null\"}]}");
+            try writeSchemaAt(writer, optional.child, meta, inner_meta, path);
+            try writer.writeAll(",{\"type\":\"null\"}]");
+            try writeDescriptionAndExample(writer, field_meta);
+            try writer.writeAll("}");
         },
         .pointer => |pointer| {
             if (pointer.size == .slice and pointer.child == u8) {
@@ -111,7 +125,9 @@ fn writeSchemaAt(
                     wrote_required = true;
                 }
             }
-            try writer.writeAll("],\"additionalProperties\":false}");
+            try writer.writeAll("],\"additionalProperties\":false");
+            try writeDescriptionAndExample(writer, field_meta);
+            try writer.writeAll("}");
         },
         .@"union" => |union_info| {
             try writer.writeAll("{\"oneOf\":[");
@@ -126,7 +142,9 @@ fn writeSchemaAt(
                 try writeJsonString(writer, name);
                 try writer.writeAll("],\"additionalProperties\":false}");
             }
-            try writer.writeAll("]}");
+            try writer.writeAll("]");
+            try writeDescriptionAndExample(writer, field_meta);
+            try writer.writeAll("}");
         },
         else => unreachable,
     }
@@ -147,8 +165,182 @@ pub fn containsTaggedUnion(comptime T: type) bool {
 }
 
 pub fn validateRawJson(comptime raw: []const u8) EmitError!void {
-    if (!(std.json.Scanner.validate(std.heap.page_allocator, raw) catch false))
-        return error.InvalidMetadataJson;
+    if (comptime !isValidJsonComptime(raw)) return error.InvalidMetadataJson;
+}
+
+const ComptimeJsonValidator = struct {
+    input: []const u8,
+    pos: usize = 0,
+
+    const max_depth: usize = 64;
+
+    fn skipWs(self: *ComptimeJsonValidator) void {
+        while (self.pos < self.input.len) : (self.pos += 1) {
+            switch (self.input[self.pos]) {
+                ' ', '\t', '\r', '\n' => {},
+                else => break,
+            }
+        }
+    }
+
+    fn parseValue(self: *ComptimeJsonValidator, depth: usize) bool {
+        if (depth > max_depth) return false;
+        self.skipWs();
+        if (self.pos >= self.input.len) return false;
+        return switch (self.input[self.pos]) {
+            '"' => self.parseString(),
+            '{' => self.parseObject(depth + 1),
+            '[' => self.parseArray(depth + 1),
+            't' => self.expectLiteral("true"),
+            'f' => self.expectLiteral("false"),
+            'n' => self.expectLiteral("null"),
+            '-', '0'...'9' => self.parseNumber(),
+            else => false,
+        };
+    }
+
+    fn expectLiteral(self: *ComptimeJsonValidator, literal: []const u8) bool {
+        if (self.pos + literal.len > self.input.len) return false;
+        if (!std.mem.eql(u8, self.input[self.pos..][0..literal.len], literal)) return false;
+        self.pos += literal.len;
+        return true;
+    }
+
+    fn parseHex4(self: *ComptimeJsonValidator) ?u16 {
+        if (self.pos + 4 > self.input.len) return null;
+        var out: u16 = 0;
+        for (self.input[self.pos..][0..4]) |c| {
+            const digit: u16 = switch (c) {
+                '0'...'9' => c - '0',
+                'a'...'f' => c - 'a' + 10,
+                'A'...'F' => c - 'A' + 10,
+                else => return null,
+            };
+            out = (out << 4) | digit;
+        }
+        self.pos += 4;
+        return out;
+    }
+
+    fn parseString(self: *ComptimeJsonValidator) bool {
+        if (self.pos >= self.input.len or self.input[self.pos] != '"') return false;
+        self.pos += 1;
+        while (self.pos < self.input.len) {
+            const c = self.input[self.pos];
+            if (c == '"') {
+                self.pos += 1;
+                return true;
+            }
+            if (c < 0x20) return false;
+            if (c == '\\') {
+                self.pos += 1;
+                if (self.pos >= self.input.len) return false;
+                switch (self.input[self.pos]) {
+                    '"', '\\', '/', 'b', 'f', 'n', 'r', 't' => self.pos += 1,
+                    'u' => {
+                        self.pos += 1;
+                        const code = self.parseHex4() orelse return false;
+                        if (code >= 0xD800 and code <= 0xDBFF) {
+                            if (self.pos + 2 > self.input.len or self.input[self.pos] != '\\' or self.input[self.pos + 1] != 'u') return false;
+                            self.pos += 2;
+                            const low = self.parseHex4() orelse return false;
+                            if (low < 0xDC00 or low > 0xDFFF) return false;
+                        } else if (code >= 0xDC00 and code <= 0xDFFF) {
+                            return false;
+                        }
+                    },
+                    else => return false,
+                }
+            } else if (c < 0x80) {
+                self.pos += 1;
+            } else {
+                const len = std.unicode.utf8ByteSequenceLength(c) catch return false;
+                if (self.pos + len > self.input.len) return false;
+                _ = std.unicode.utf8Decode(self.input[self.pos..][0..len]) catch return false;
+                self.pos += len;
+            }
+        }
+        return false;
+    }
+
+    fn parseNumber(self: *ComptimeJsonValidator) bool {
+        if (self.pos < self.input.len and self.input[self.pos] == '-') self.pos += 1;
+        if (self.pos >= self.input.len) return false;
+        if (self.input[self.pos] == '0') {
+            self.pos += 1;
+        } else if (self.input[self.pos] >= '1' and self.input[self.pos] <= '9') {
+            while (self.pos < self.input.len and self.input[self.pos] >= '0' and self.input[self.pos] <= '9') self.pos += 1;
+        } else {
+            return false;
+        }
+        if (self.pos < self.input.len and self.input[self.pos] == '.') {
+            self.pos += 1;
+            const frac_start = self.pos;
+            while (self.pos < self.input.len and self.input[self.pos] >= '0' and self.input[self.pos] <= '9') self.pos += 1;
+            if (self.pos == frac_start) return false;
+        }
+        if (self.pos < self.input.len and (self.input[self.pos] == 'e' or self.input[self.pos] == 'E')) {
+            self.pos += 1;
+            if (self.pos < self.input.len and (self.input[self.pos] == '+' or self.input[self.pos] == '-')) self.pos += 1;
+            const exp_start = self.pos;
+            while (self.pos < self.input.len and self.input[self.pos] >= '0' and self.input[self.pos] <= '9') self.pos += 1;
+            if (self.pos == exp_start) return false;
+        }
+        return true;
+    }
+
+    fn parseObject(self: *ComptimeJsonValidator, depth: usize) bool {
+        self.pos += 1;
+        self.skipWs();
+        if (self.pos < self.input.len and self.input[self.pos] == '}') {
+            self.pos += 1;
+            return true;
+        }
+        while (true) {
+            self.skipWs();
+            if (!self.parseString()) return false;
+            self.skipWs();
+            if (self.pos >= self.input.len or self.input[self.pos] != ':') return false;
+            self.pos += 1;
+            if (!self.parseValue(depth)) return false;
+            self.skipWs();
+            if (self.pos >= self.input.len) return false;
+            if (self.input[self.pos] == '}') {
+                self.pos += 1;
+                return true;
+            }
+            if (self.input[self.pos] != ',') return false;
+            self.pos += 1;
+        }
+    }
+
+    fn parseArray(self: *ComptimeJsonValidator, depth: usize) bool {
+        self.pos += 1;
+        self.skipWs();
+        if (self.pos < self.input.len and self.input[self.pos] == ']') {
+            self.pos += 1;
+            return true;
+        }
+        while (true) {
+            if (!self.parseValue(depth)) return false;
+            self.skipWs();
+            if (self.pos >= self.input.len) return false;
+            if (self.input[self.pos] == ']') {
+                self.pos += 1;
+                return true;
+            }
+            if (self.input[self.pos] != ',') return false;
+            self.pos += 1;
+        }
+    }
+};
+
+fn isValidJsonComptime(comptime raw: []const u8) bool {
+    @setEvalBranchQuota(@max(10_000, raw.len * 64));
+    var validator: ComptimeJsonValidator = .{ .input = raw };
+    if (!validator.parseValue(0)) return false;
+    validator.skipWs();
+    return validator.pos == raw.len;
 }
 
 fn writeInteger(writer: *std.Io.Writer, comptime T: type, comptime field_meta: ?contract.FieldMeta) !void {

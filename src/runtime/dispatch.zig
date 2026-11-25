@@ -76,13 +76,69 @@ fn writeSuccess(allocator: std.mem.Allocator, output: anytype) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     try out.writer.writeAll("{\"kind\":\"success\",\"output\":");
-    if (@TypeOf(output) == void) {
-        try out.writer.writeAll("null");
-    } else {
-        try std.json.Stringify.value(output, .{}, &out.writer);
-    }
+    try writeJsonValue(&out.writer, output);
     try out.writer.writeAll("}");
     return out.toOwnedSlice();
+}
+
+fn writeJsonValue(writer: *std.Io.Writer, value: anytype) !void {
+    const T = @TypeOf(value);
+    switch (@typeInfo(T)) {
+        .void => try writer.writeAll("null"),
+        .optional => {
+            if (value) |inner| {
+                try writeJsonValue(writer, inner);
+            } else {
+                try writer.writeAll("null");
+            }
+        },
+        .@"struct" => |s| {
+            try writer.writeByte('{');
+            inline for (s.field_names, 0..) |field_name, i| {
+                if (i != 0) try writer.writeByte(',');
+                try std.json.Stringify.value(field_name, .{}, writer);
+                try writer.writeByte(':');
+                try writeJsonValue(writer, @field(value, field_name));
+            }
+            try writer.writeByte('}');
+        },
+        .@"union" => {
+            try writer.writeByte('{');
+            switch (value) {
+                inline else => |payload, tag| {
+                    try std.json.Stringify.value(@tagName(tag), .{}, writer);
+                    try writer.writeByte(':');
+                    try writeJsonValue(writer, payload);
+                },
+            }
+            try writer.writeByte('}');
+        },
+        .array => |a| {
+            if (a.child == u8) {
+                try std.json.Stringify.value(value, .{}, writer);
+            } else {
+                try writer.writeByte('[');
+                for (value, 0..) |item, i| {
+                    if (i != 0) try writer.writeByte(',');
+                    try writeJsonValue(writer, item);
+                }
+                try writer.writeByte(']');
+            }
+        },
+        .pointer => |p| {
+            if (p.size == .slice and p.child != u8) {
+                try writer.writeByte('[');
+                for (value, 0..) |item, i| {
+                    if (i != 0) try writer.writeByte(',');
+                    try writeJsonValue(writer, item);
+                }
+                try writer.writeByte(']');
+            } else {
+                try std.json.Stringify.value(value, .{}, writer);
+            }
+        },
+        else => try std.json.Stringify.value(value, .{}, writer),
+    }
 }
 
 fn writeToolError(comptime meta: contract.ToolMeta, allocator: std.mem.Allocator, err: anyerror) ![]u8 {
@@ -110,9 +166,8 @@ fn writeValidation(allocator: std.mem.Allocator, failure: diagnostic.Diagnostic)
 }
 
 fn writeInternal(allocator: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "{{\"kind\":\"internal_error\",\"code\":\"internal_error\",\"message\":\"tool execution failed\"}}",
-        .{},
+    return allocator.dupe(
+        u8,
+        "{\"kind\":\"internal_error\",\"code\":\"internal_error\",\"message\":\"tool execution failed\"}",
     );
 }

@@ -98,7 +98,10 @@ fn check(io: std.Io, arena: std.mem.Allocator, stdout: *std.Io.Writer, args: []c
     if (std.mem.eql(u8, name, "all")) {
         if (generated != null or target != null) fail("check all does not accept --target or --generated", .{});
         const clean = try Registry.checkAll(stdout);
-        if (!clean) std.process.exit(1);
+        if (!clean) {
+            stdout.flush() catch {};
+            std.process.exit(1);
+        }
         try stdout.writeAll("{\"status\":\"ok\",\"tools\":\"all\"}\n");
         return;
     }

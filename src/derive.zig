@@ -35,18 +35,26 @@ pub fn validate(comptime handler: anytype, comptime meta: contract.ToolMeta) voi
     const input = Input(handler);
     if (@typeInfo(input) != .@"struct")
         @compileError("blacksmith tool input must be a struct");
-    validateType(input, "$", true);
-    validateType(Output(handler), "$result", false);
+    validateType(input, "$", true, &.{});
+    validateType(Output(handler), "$result", false, &.{});
 
-    inline for (meta.fields) |field_meta| {
+    inline for (meta.fields, 0..) |field_meta, i| {
+        inline for (meta.fields[0..i]) |earlier| {
+            if (comptime contract.eql(field_meta.name, earlier.name))
+                @compileError("blacksmith field metadata contains duplicate field paths");
+        }
         if (!pathExists(input, field_meta.name))
             @compileError("blacksmith field metadata names a field path that does not exist");
         validateConstraints(FieldType(input, field_meta.name), field_meta.constraints);
     }
 
-    inline for (meta.errors) |tool_error| {
+    inline for (meta.errors, 0..) |tool_error, i| {
         if (tool_error.zig_name.len == 0 or tool_error.code.len == 0 or tool_error.safe_message.len == 0)
             @compileError("blacksmith declared errors require zig_name, code, and safe_message");
+        inline for (meta.errors[0..i]) |earlier| {
+            if (comptime contract.eql(tool_error.zig_name, earlier.zig_name) or contract.eql(tool_error.code, earlier.code))
+                @compileError("blacksmith declared errors contain duplicate entries");
+        }
     }
 }
 
@@ -174,23 +182,32 @@ pub fn FieldType(comptime T: type, comptime path: []const u8) type {
     @compileError("blacksmith field metadata names a field path that does not exist");
 }
 
-fn validateType(comptime T: type, comptime path: []const u8, comptime allow_error_union: bool) void {
+fn validateType(
+    comptime T: type,
+    comptime path: []const u8,
+    comptime allow_error_union: bool,
+    comptime visited: []const type,
+) void {
+    inline for (visited) |seen| {
+        if (seen == T) @compileError("blacksmith does not support recursive types");
+    }
+    const next_visited = visited ++ &[_]type{T};
     switch (@typeInfo(T)) {
         .bool, .int, .float, .comptime_float, .void, .@"enum" => {},
-        .optional => |o| validateType(o.child, path, false),
-        .array => |a| validateType(a.child, path, false),
+        .optional => |o| validateType(o.child, path, false, visited),
+        .array => |a| validateType(a.child, path, false, visited),
         .pointer => |p| {
             if (p.size != .slice) @compileError("blacksmith does not support non-slice pointer fields");
-            validateType(p.child, path, false);
+            validateType(p.child, path, false, visited);
         },
-        .@"struct" => |s| inline for (s.field_types) |field_type| validateType(field_type, path, false),
+        .@"struct" => |s| inline for (s.field_types) |field_type| validateType(field_type, path, false, next_visited),
         .@"union" => |u| {
             if (u.tag_type == null) @compileError("blacksmith requires tagged unions");
-            inline for (u.field_types) |field_type| validateType(field_type, path, false);
+            inline for (u.field_types) |field_type| validateType(field_type, path, false, next_visited);
         },
         .error_union => |eu| {
             if (!allow_error_union) @compileError("blacksmith supports error unions only as handler return types");
-            validateType(eu.payload, path, false);
+            validateType(eu.payload, path, false, visited);
         },
         else => @compileError("blacksmith encountered an unsupported Zig type"),
     }

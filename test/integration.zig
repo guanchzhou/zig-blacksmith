@@ -319,3 +319,184 @@ test "registry defaults satisfy their own constraints" {
     try std.testing.expectEqualStrings("$.count", failure.path);
     try std.testing.expectEqual(blacksmith.diagnostic.Code.constraint_violation, failure.code);
 }
+
+test "decode enforces JSON max_depth and max_input_bytes limits" {
+    const local = struct {
+        fn run(_: struct { ok: bool }) void {}
+    }.run;
+    const Lim = blacksmith.Tool(local, .{ .name = "lim", .description = "Limit test." });
+
+    // Exceed max_depth
+    const depth = blacksmith.runtime.decode.max_depth + 2;
+    var deep = try std.testing.allocator.alloc(u8, depth * 2);
+    defer std.testing.allocator.free(deep);
+    @memset(deep[0..depth], '[');
+    @memset(deep[depth..], ']');
+    try expectInvoke(Lim, deep, "\"code\":\"invalid_json\"");
+
+    // Exceed max_input_bytes
+    const over = blacksmith.runtime.decode.max_input_bytes + 16;
+    var huge = try std.testing.allocator.alloc(u8, over);
+    defer std.testing.allocator.free(huge);
+    @memset(huge, ' ');
+    huge[0] = '{';
+    huge[over - 1] = '}';
+    try expectInvoke(Lim, huge, "\"code\":\"invalid_json\"");
+}
+
+test "decode rejects non-finite floats and f32/f16 overflow without UB" {
+    const local = struct {
+        fn run(_: struct { big: f64, narrow: f32, half: f16 }) void {}
+    }.run;
+    const Floats = blacksmith.Tool(local, .{ .name = "floats", .description = "Float bounds." });
+
+    try expectInvoke(Floats, "{\"big\":1.5,\"narrow\":1.5,\"half\":1.5}", "\"kind\":\"success\"");
+    try expectInvoke(Floats, "{\"big\":1e400,\"narrow\":1.0,\"half\":1.0}", "\"expected\":\"finite number\"");
+    try expectInvoke(Floats, "{\"big\":-1e400,\"narrow\":1.0,\"half\":1.0}", "\"expected\":\"finite number\"");
+    try expectInvoke(Floats, "{\"big\":1.0,\"narrow\":1e40,\"half\":1.0}", "\"expected\":\"finite number\"");
+    try expectInvoke(Floats, "{\"big\":1.0,\"narrow\":-1e40,\"half\":1.0}", "\"expected\":\"finite number\"");
+    try expectInvoke(Floats, "{\"big\":1.0,\"narrow\":1.0,\"half\":1e10}", "\"expected\":\"finite number\"");
+
+    // Negative huge exponent on integer must not trigger -inf UB in floatInteger.
+    try expectInvoke(tools.Scale, "{\"value\":-1e400}", "\"expected\":\"integer type range\"");
+}
+
+test "decode propagates OutOfMemory instead of reporting wrong_type" {
+    const local = struct {
+        fn run(_: struct { items: []const []const u8 }) void {}
+    }.run;
+    const AllocTool = blacksmith.Tool(local, .{ .name = "alloc_tool", .description = "Allocation test." });
+    const input = "{\"items\":[\"alpha\",\"beta\",\"gamma\",\"delta\"]}";
+
+    var saw_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var arena = std.heap.ArenaAllocator.init(failing.allocator());
+        defer arena.deinit();
+        const res = blacksmith.runtime.decode.decode(AllocTool.Input, AllocTool.meta, arena.allocator(), input);
+        if (res) |outcome| {
+            switch (outcome) {
+                .ok => break,
+                .invalid => |err| {
+                    std.debug.print("unexpected validation failure on OOM fail_index={d}: {s}\n", .{ fail_index, err.message });
+                    return error.TestUnexpectedResult;
+                },
+            }
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_oom = true;
+        }
+    }
+    try std.testing.expect(saw_oom);
+}
+
+test "void fields and union void variants decode and serialize as null" {
+    const Action = union(enum) {
+        ping: void,
+        echo: []const u8,
+    };
+    const Payload = struct {
+        marker: void,
+        action: Action,
+    };
+    const handler = struct {
+        fn run(in: Payload) Payload {
+            return in;
+        }
+    }.run;
+    const VoidTool = blacksmith.Tool(handler, .{ .name = "void_tool", .description = "Void roundtrip." });
+
+    const ping_out = try VoidTool.invoke(std.testing.allocator, "{\"marker\":null,\"action\":{\"ping\":null}}");
+    defer std.testing.allocator.free(ping_out);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"success\",\"output\":{\"marker\":null,\"action\":{\"ping\":null}}}",
+        ping_out,
+    );
+
+    const echo_out = try VoidTool.invoke(std.testing.allocator, "{\"marker\":null,\"action\":{\"echo\":\"hi\"}}");
+    defer std.testing.allocator.free(echo_out);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"success\",\"output\":{\"marker\":null,\"action\":{\"echo\":\"hi\"}}}",
+        echo_out,
+    );
+
+    try expectInvoke(VoidTool, "{\"marker\":1,\"action\":{\"ping\":null}}", "\"expected\":\"null\"");
+}
+
+test "invalid UTF-8 fails string validation" {
+    const local = struct {
+        fn run(_: struct { text: []const u8 }) void {}
+    }.run;
+    const Utf8Tool = blacksmith.Tool(local, .{
+        .name = "utf8_tool",
+        .description = "UTF-8 validation.",
+        .fields = &.{.{ .name = "text", .constraints = .{ .min_length = 2, .max_length = 10 } }},
+    });
+
+    const bad = "{\"text\":\"\xff\xfe\"}";
+    try expectInvoke(Utf8Tool, bad, "\"code\":\"invalid_json\"");
+}
+
+test "comptime raw JSON validation accepts valid values and rejects invalid ones" {
+    try blacksmith.emit.common.validateRawJson("true");
+    try blacksmith.emit.common.validateRawJson("{\"a\":[1,-2.5e+3,null,\"\\u0041\\ud83d\\ude00\"]}");
+    try std.testing.expectError(error.InvalidMetadataJson, blacksmith.emit.common.validateRawJson("{bad"));
+    try std.testing.expectError(error.InvalidMetadataJson, blacksmith.emit.common.validateRawJson("\"\\ud800\""));
+    try std.testing.expectError(error.InvalidMetadataJson, blacksmith.emit.common.validateRawJson("1 2"));
+}
+
+test "schema metadata emits on bool, struct, union, and outer optional" {
+    const Mode = union(enum) {
+        fast: void,
+        custom: i32,
+    };
+    const Nested = struct {
+        enabled: bool,
+    };
+    const Input = struct {
+        flag: bool,
+        nested: Nested,
+        mode: Mode,
+        label: ?[]const u8 = null,
+    };
+    const handler = struct {
+        fn run(_: Input) void {}
+    }.run;
+    const MetaTool = blacksmith.Tool(handler, .{
+        .name = "meta_tool",
+        .description = "Metadata coverage.",
+        .fields = &.{
+            .{ .name = "flag", .description = "Bool flag.", .default_json = "false", .example_json = "true" },
+            .{ .name = "nested", .description = "Nested object.", .example_json = "{\"enabled\":true}" },
+            .{ .name = "mode", .description = "Execution mode.", .example_json = "{\"fast\":null}" },
+            .{ .name = "label", .description = "Optional label.", .default_json = "null", .constraints = .{ .max_length = 8 } },
+        },
+    });
+    const schema = try MetaTool.contractJson(std.testing.allocator);
+    defer std.testing.allocator.free(schema);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, schema, .{});
+    defer parsed.deinit();
+    const props = parsed.value.object.get("input").?.object.get("properties").?.object;
+
+    const flag_obj = props.get("flag").?.object;
+    try std.testing.expectEqualStrings("Bool flag.", flag_obj.get("description").?.string);
+    try std.testing.expectEqual(false, flag_obj.get("default").?.bool);
+    try std.testing.expect(flag_obj.get("examples") != null);
+
+    const nested_obj = props.get("nested").?.object;
+    try std.testing.expectEqualStrings("Nested object.", nested_obj.get("description").?.string);
+    try std.testing.expect(nested_obj.get("examples") != null);
+
+    const mode_obj = props.get("mode").?.object;
+    try std.testing.expectEqualStrings("Execution mode.", mode_obj.get("description").?.string);
+    try std.testing.expect(mode_obj.get("examples") != null);
+
+    const label_obj = props.get("label").?.object;
+    try std.testing.expectEqualStrings("Optional label.", label_obj.get("description").?.string);
+    try std.testing.expect(label_obj.get("default").? == .null);
+    const label_inner = label_obj.get("anyOf").?.array.items[0].object;
+    try std.testing.expectEqual(@as(i64, 8), label_inner.get("maxLength").?.integer);
+    try std.testing.expect(label_inner.get("description") == null);
+}

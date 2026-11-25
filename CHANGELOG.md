@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3 - 2026-11-25
+
+- Enforce maximum JSON input byte size and nesting depth limits during decoding to prevent DoS from oversized or deeply nested payloads.
+- Reject non-finite floating-point values (`NaN`, `Inf`) and narrowing integer/float overflows during decoding, and guard `floatInteger` against non-finite inputs.
+- Propagate `OutOfMemory` errors instead of swallowing allocation failures during validation and decoding.
+- Align `void` fields and tagged-union `void` variants on `null` for decode and encode parity.
+- Reject invalid UTF-8 strings during decoding and use a byte-length fast path for ASCII strings when checking string length constraints.
+- Validate raw JSON defaults and metadata at compile time, removing runtime `page_allocator` syscalls.
+- Emit declared metadata on `bool`, struct, union, and outer optional schemas.
+- Reject recursive type definitions and duplicate metadata entries at compile time.
+- Flush `stdout` before exiting in `check all` so output is not truncated when redirected or piped.
+- Harden the `zig-tool` launcher on POSIX with directory ownership, trust, and mount-boundary checks while walking upward for a project root.
+
 ## 0.1.2 - 2026-10-25
 
 - Validate array elements against their own type instead of the array field's constraints, so `{"rows":[[]]}` is accepted when `rows` has `min_items = 1`. Element diagnostics use paths such as `$.rows[]`.

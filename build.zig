@@ -54,6 +54,14 @@ pub fn build(b: *std.Build) void {
     const unit = b.addTest(.{ .root_module = blacksmith });
     test_step.dependOn(&b.addRunArtifact(unit).step);
 
+    const launcher_test = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/launcher.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "build_options", .module = options.createModule() }},
+    }) });
+    test_step.dependOn(&b.addRunArtifact(launcher_test).step);
+
     const integration = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("test/integration.zig"),
         .target = target,
@@ -127,6 +135,33 @@ pub fn build(b: *std.Build) void {
     }) });
     constraint_kind_mismatch.expect_errors = .{ .contains = "blacksmith length and item constraints apply only to strings and arrays" };
     test_step.dependOn(&constraint_kind_mismatch.step);
+
+    const recursive_type = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test/compile_fail/recursive_type.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "blacksmith", .module = blacksmith }},
+    }) });
+    recursive_type.expect_errors = .{ .contains = "blacksmith does not support recursive types" };
+    test_step.dependOn(&recursive_type.step);
+
+    const duplicate_field_meta = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test/compile_fail/duplicate_field_meta.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "blacksmith", .module = blacksmith }},
+    }) });
+    duplicate_field_meta.expect_errors = .{ .contains = "blacksmith field metadata contains duplicate field paths" };
+    test_step.dependOn(&duplicate_field_meta.step);
+
+    const duplicate_declared_error = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("test/compile_fail/duplicate_declared_error.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "blacksmith", .module = blacksmith }},
+    }) });
+    duplicate_declared_error.expect_errors = .{ .contains = "blacksmith declared errors contain duplicate entries" };
+    test_step.dependOn(&duplicate_declared_error.step);
 
     const example = b.addExecutable(.{
         .name = "weather-tools",

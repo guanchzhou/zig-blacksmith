@@ -3,6 +3,9 @@ const contract = @import("../contract.zig");
 const derive = @import("../derive.zig");
 const diagnostic = @import("../diagnostic.zig");
 
+pub const max_input_bytes: usize = 1 * 1024 * 1024;
+pub const max_depth: usize = 64;
+
 pub const Decoded = struct {
     value: std.json.Value,
 };
@@ -16,6 +19,19 @@ pub fn decode(
     ok: T,
     invalid: diagnostic.Diagnostic,
 } {
+    if (text.len > max_input_bytes) {
+        return .{ .invalid = diagnostic.safe(
+            .validation,
+            .invalid_json,
+            .runtime,
+            "$",
+            "JSON within size limit",
+            "oversized_input",
+            "JSON input exceeds maximum allowed size",
+        ) };
+    }
+    if (try scanLimits(arena, text)) |failure| return .{ .invalid = failure };
+
     var parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.DuplicateField => return .{ .invalid = diagnostic.safe(
@@ -41,8 +57,9 @@ pub fn decode(
     if (validateValue(T, meta, parsed, "$")) |failure| return .{ .invalid = failure };
     try applyDefaults(T, meta, arena, &parsed, "");
 
-    const typed = std.json.parseFromValueLeaky(T, arena, parsed, .{}) catch
-        return .{ .invalid = diagnostic.safe(
+    const typed = convertValue(T, arena, parsed) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .{ .invalid = diagnostic.safe(
             .validation,
             .wrong_type,
             .runtime,
@@ -50,8 +67,119 @@ pub fn decode(
             "declared input contract",
             "conversion_failure",
             "input does not match the declared contract",
-        ) };
+        ) },
+    };
     return .{ .ok = typed };
+}
+
+fn scanLimits(arena: std.mem.Allocator, text: []const u8) error{OutOfMemory}!?diagnostic.Diagnostic {
+    var scanner = std.json.Scanner.initCompleteInput(arena, text);
+    defer scanner.deinit();
+    var depth: usize = 0;
+    while (true) {
+        const token = scanner.next() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return diagnostic.safe(
+                .validation,
+                .invalid_json,
+                .runtime,
+                "$",
+                "valid JSON",
+                "malformed_json",
+                "invalid JSON input",
+            ),
+        };
+        switch (token) {
+            .object_begin, .array_begin => {
+                depth += 1;
+                if (depth > max_depth) {
+                    return diagnostic.safe(
+                        .validation,
+                        .invalid_json,
+                        .runtime,
+                        "$",
+                        "JSON within depth limit",
+                        "excessive_depth",
+                        "JSON nesting exceeds maximum allowed depth",
+                    );
+                }
+            },
+            .object_end, .array_end => depth -= 1,
+            .end_of_document => return null,
+            else => {},
+        }
+    }
+}
+
+fn containsVoid(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .void => true,
+        .optional => |o| containsVoid(o.child),
+        .array => |a| containsVoid(a.child),
+        .pointer => |p| p.size == .slice and containsVoid(p.child),
+        .@"struct" => |s| blk: {
+            inline for (s.field_types) |ft| if (containsVoid(ft)) break :blk true;
+            break :blk false;
+        },
+        .@"union" => |u| blk: {
+            inline for (u.field_types) |ft| if (containsVoid(ft)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn convertValue(comptime T: type, arena: std.mem.Allocator, value: std.json.Value) !T {
+    if (comptime !containsVoid(T)) {
+        return std.json.parseFromValueLeaky(T, arena, value, .{});
+    }
+    return switch (@typeInfo(T)) {
+        .void => if (value == .null) {} else error.UnexpectedToken,
+        .optional => |opt| if (value == .null) null else try convertValue(opt.child, arena, value),
+        .array => |arr| blk: {
+            if (value != .array or value.array.items.len != arr.len) return error.UnexpectedToken;
+            var out: T = undefined;
+            for (value.array.items, 0..) |item, i| {
+                out[i] = try convertValue(arr.child, arena, item);
+            }
+            break :blk out;
+        },
+        .pointer => |ptr| blk: {
+            if (ptr.size != .slice) unreachable;
+            if (value != .array) return error.UnexpectedToken;
+            const out = try arena.alloc(ptr.child, value.array.items.len);
+            for (value.array.items, 0..) |item, i| {
+                out[i] = try convertValue(ptr.child, arena, item);
+            }
+            break :blk out;
+        },
+        .@"struct" => |s| blk: {
+            if (value != .object) return error.UnexpectedToken;
+            var out: T = undefined;
+            inline for (s.field_names, s.field_types, s.field_attrs) |field_name, field_type, field_attrs| {
+                if (value.object.get(field_name)) |child| {
+                    @field(out, field_name) = try convertValue(field_type, arena, child);
+                } else if (field_attrs.defaultValue(field_type)) |default| {
+                    @field(out, field_name) = default;
+                } else if (@typeInfo(field_type) == .optional) {
+                    @field(out, field_name) = null;
+                } else {
+                    return error.MissingField;
+                }
+            }
+            break :blk out;
+        },
+        .@"union" => |u| blk: {
+            if (value != .object or value.object.count() != 1) return error.UnexpectedToken;
+            inline for (u.field_names, u.field_types) |field_name, field_type| {
+                if (value.object.get(field_name)) |child| {
+                    break :blk @unionInit(T, field_name, try convertValue(field_type, arena, child));
+                }
+            }
+            return error.UnknownField;
+        },
+        else => unreachable,
+    };
 }
 
 fn validateValue(
@@ -70,6 +198,11 @@ fn validateValue(
                 .number_string => |v| std.fmt.parseFloat(f64, v) catch return wrong(path, "number", "number"),
                 else => return wrong(path, "number", category(value)),
             };
+            if (!std.math.isFinite(number)) return constraintFailure(path, "finite number");
+            if (@typeInfo(T) == .float) {
+                const narrowed: T = @floatCast(number);
+                if (!std.math.isFinite(narrowed)) return constraintFailure(path, "finite number");
+            }
             if (fieldConstraints(meta, path)) |constraints| if (numericViolation(constraints, number))
                 return constraintFailure(path, "numeric bounds");
         },
@@ -168,6 +301,7 @@ fn validateInteger(
     const number: W = switch (value) {
         .integer => |v| v,
         .float => |v| blk: {
+            if (!std.math.isFinite(v)) return constraintFailure(path, "integer type range");
             if (@floor(v) != v) return wrong(path, "integer", "number");
             break :blk floatInteger(W, v) orelse return constraintFailure(path, "integer type range");
         },
@@ -184,6 +318,7 @@ fn validateInteger(
 }
 
 fn floatInteger(comptime W: type, value: f64) ?W {
+    if (!std.math.isFinite(value)) return null;
     const limit = comptime std.math.ldexp(@as(f64, 1), @typeInfo(W).int.bits - 1);
     if (value < -limit or value >= limit) return null;
     return @intFromFloat(value);
@@ -201,7 +336,21 @@ fn validateString(
     };
     if (fixed_len) |len| if (text.len != len) return constraintFailure(path, "fixed string length");
     if (fieldConstraints(meta, path)) |constraints| {
-        const count = std.unicode.utf8CountCodepoints(text) catch text.len;
+        if (constraints.min_length == null and constraints.max_length == null) return null;
+        if (!std.unicode.utf8ValidateSlice(text))
+            return wrong(path, "valid UTF-8 string", "invalid_utf8");
+        const max_possible = text.len;
+        const min_possible = text.len / 4 + @intFromBool(text.len % 4 != 0);
+        if (constraints.min_length) |minimum| {
+            if (max_possible < minimum) return constraintFailure(path, "minimum string length");
+        }
+        if (constraints.max_length) |maximum| {
+            if (min_possible > maximum) return constraintFailure(path, "maximum string length");
+        }
+        const min_satisfied = if (constraints.min_length) |minimum| min_possible >= minimum else true;
+        const max_satisfied = if (constraints.max_length) |maximum| max_possible <= maximum else true;
+        if (min_satisfied and max_satisfied) return null;
+        const count = std.unicode.utf8CountCodepoints(text) catch unreachable;
         if (constraints.min_length) |minimum| if (count < minimum) return constraintFailure(path, "minimum string length");
         if (constraints.max_length) |maximum| if (count > maximum) return constraintFailure(path, "maximum string length");
     }
@@ -278,6 +427,7 @@ fn fieldConstraints(comptime meta: contract.ToolMeta, comptime path: []const u8)
 }
 
 fn numericViolation(c: contract.Constraints, value: f64) bool {
+    if (!std.math.isFinite(value)) return true;
     if (c.minimum) |minimum| if (value < minimum) return true;
     if (c.maximum) |maximum| if (value > maximum) return true;
     return false;
@@ -309,4 +459,27 @@ test "std.json rejects duplicate keys when parsing a dynamic value" {
     try std.testing.expectError(error.DuplicateField, std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"a\":1,\"a\":2}", .{}));
     try std.testing.expectError(error.DuplicateField, std.json.parseFromSliceLeaky(std.json.Value, arena, "[{\"b\":{\"a\":1,\"\\u0061\":2}}]", .{}));
     _ = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"a\":{\"a\":1},\"b\":{\"a\":2}}", .{});
+}
+
+test "floatInteger and numericViolation reject non-finite values" {
+    const inf = std.math.inf(f64);
+    const nan = std.math.nan(f64);
+    try std.testing.expectEqual(@as(?i128, null), floatInteger(i128, inf));
+    try std.testing.expectEqual(@as(?i128, null), floatInteger(i128, -inf));
+    try std.testing.expectEqual(@as(?i128, null), floatInteger(i128, nan));
+    try std.testing.expect(numericViolation(.{}, inf));
+    try std.testing.expect(numericViolation(.{}, -inf));
+    try std.testing.expect(numericViolation(.{}, nan));
+}
+
+test "validateString rejects invalid UTF-8 instead of falling back to byte length" {
+    const meta: contract.ToolMeta = .{
+        .name = "utf8_check",
+        .description = "UTF-8 validation.",
+        .fields = &.{.{ .name = "text", .constraints = .{ .min_length = 2, .max_length = 10 } }},
+    };
+    const diag = validateString(meta, .{ .string = "\xff\xfe" }, "$.text", null);
+    try std.testing.expect(diag != null);
+    try std.testing.expectEqual(diagnostic.Code.wrong_type, diag.?.code);
+    try std.testing.expectEqualStrings("invalid_utf8", diag.?.actual_category.?);
 }
