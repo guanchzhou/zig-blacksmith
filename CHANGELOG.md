@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4 - 2026-11-26
+
+- Fix POSIX launcher test directory handles to pass `.iterate = true` so `fchmod` succeeds on Linux.
+
 ## 0.1.3 - 2026-11-25
 
 - Enforce maximum JSON input byte size and nesting depth limits during decoding to prevent DoS from oversized or deeply nested payloads.
