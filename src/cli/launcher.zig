@@ -165,7 +165,7 @@ test "findProjectRootFrom refuses world-writable and sticky directories on POSIX
     try tmp.dir.createDirPath(io, "writable/sub");
     try tmp.dir.writeFile(io, .{ .sub_path = "writable/build.zig", .data = "" });
     try tmp.dir.writeFile(io, .{ .sub_path = "writable/build.zig.zon", .data = "" });
-    var writable_dir = try tmp.dir.openDir(io, "writable", .{});
+    var writable_dir = try tmp.dir.openDir(io, "writable", .{ .iterate = true });
     defer writable_dir.close(io);
     try writable_dir.setPermissions(io, .fromMode(0o777));
     defer writable_dir.setPermissions(io, .fromMode(0o755)) catch {};
@@ -176,7 +176,7 @@ test "findProjectRootFrom refuses world-writable and sticky directories on POSIX
     try tmp.dir.createDirPath(io, "sticky/sub");
     try tmp.dir.writeFile(io, .{ .sub_path = "sticky/build.zig", .data = "" });
     try tmp.dir.writeFile(io, .{ .sub_path = "sticky/build.zig.zon", .data = "" });
-    var sticky_dir = try tmp.dir.openDir(io, "sticky", .{});
+    var sticky_dir = try tmp.dir.openDir(io, "sticky", .{ .iterate = true });
     defer sticky_dir.close(io);
     try sticky_dir.setPermissions(io, .fromMode(0o1755));
     defer sticky_dir.setPermissions(io, .fromMode(0o755)) catch {};
